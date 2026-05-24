@@ -2,6 +2,8 @@
 
 > **Snap any image, screenshot, or webpage into plaintext. No GPU. No cloud. One command.**
 
+![textsnap demo](demo-textsnap.jpg)
+
 ![Python](https://img.shields.io/badge/python-3.9+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
