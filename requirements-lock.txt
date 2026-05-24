@@ -1,0 +1,32 @@
+# textsnap locked dependencies
+# -----------------------------------------------------------------------------
+# Exact version pins for reproducible installs:
+#
+#     pip install -r requirements-lock.txt
+#
+# These are the runtime imports textsnap bootstraps in _ensure_deps(). Versions
+# are pinned to a known-good floor; bump deliberately and re-test.
+#
+# HASH PINNING (optional, strongest):
+# To add per-wheel --hash entries (so pip refuses any tampered/substituted
+# wheel), regenerate this file on your target platform with pip-tools:
+#
+#     pip install pip-tools
+#     pip-compile --generate-hashes --output-file requirements-lock.txt \
+#         pyproject.toml
+#
+# Hashes are platform/wheel-specific, so they must be generated on (or for) the
+# environment you deploy to rather than committed blindly. Until then, the pins
+# below still guarantee version reproducibility.
+# -----------------------------------------------------------------------------
+
+numpy==2.2.1
+pillow==11.1.0
+onnxruntime==1.26.0
+huggingface_hub==0.27.1
+requests==2.32.3
+tokenizers==0.21.0
+psutil==6.1.1
+beautifulsoup4==4.12.3
+readability-lxml==0.8.1
+lxml==5.3.0
