@@ -9,7 +9,8 @@ description = "Snap any image, screenshot, or webpage into plaintext. No GPU. No
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "kouhxp" }]
+license-files = ["LICENSE"]
+authors = [{ name = "kouhxp", email = "hi@kouh.me" }]
 keywords = ["ocr", "paddleocr", "onnx", "cpu", "vlm", "document-parsing", "screenshot"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -20,6 +21,11 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Image Recognition",
     "Topic :: Text Processing",
 ]
@@ -39,6 +45,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/kouhxp/textsnap"
 Repository = "https://github.com/kouhxp/textsnap"
+Issues = "https://github.com/kouhxp/textsnap/issues"
 
 [project.scripts]
 textsnap = "textsnap:main"
