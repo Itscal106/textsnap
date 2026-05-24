@@ -30,7 +30,7 @@ That's it. You get a `.txt` next to your shell, recognized on your CPU, from a s
 
 ```
 # Install
-pip install .
+pip install textsnap
 
 # Snap something
 textsnap screenshot.png
@@ -58,10 +58,16 @@ Local files cover anything Pillow can decode: `.png`, `.jpg`, `.jpeg`, `.webp`, 
 ## Install
 
 ```
-pip install .
+pip install textsnap
 ```
 
 Installs two equivalent commands on your `PATH`: **`textsnap`** (canonical) and **`ocr`** (alias, for when the name slips your mind).
+
+To install from a local source checkout instead:
+
+```
+pip install .
+```
 
 For a reproducible install with exact pinned dependency versions:
 
