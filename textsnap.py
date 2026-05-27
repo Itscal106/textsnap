@@ -17,6 +17,8 @@ Options:
     -o, --output    Output .txt path. Default: ./textsnaps/<name>_ocr.txt.
     --model-dir DIR Use ONNX/config files from DIR instead of downloading.
     --max-tokens N  Cap generated tokens (default 2048).
+    --max-pixels N  Image pixel budget for the vision encoder (default is the
+                    model's max). Lower trades accuracy for speed.
 
 Output:
     Plaintext, UTF-8. Default location is ./textsnaps/ (created if missing)
@@ -24,9 +26,19 @@ Output:
     "<name>_ocr.txt", where <name> is the image filename stem (for image
     inputs) or the webpage slug (for HTML inputs).
 
-The 3 ONNX components (~890 MB) are auto-downloaded on first run and cached in
-~/.cache/textsnap. The vision encoder and decoder use the q4 variants; the
-embedding model ships fp32 only (no q4 exists in the repo).
+    When the input image comes from the clipboard (textsnap run with no
+    arguments), the OCR text is ALSO copied back to the clipboard so it can
+    be pasted immediately -- the .txt file is still written as well.
+
+Model files:
+    The 3 ONNX components (~890 MB) are auto-downloaded on first run and
+    cached in ~/.cache/textsnap. The vision encoder and decoder use the q4
+    variants; the embedding model ships fp32 only (no q4 exists in the repo).
+
+    Portable mode: if the model files are found next to this script
+    (./onnx/*.onnx + ./tokenizer.json), they are used directly -- no
+    download, no --model-dir flag, no setup. Copy the textsnap folder
+    together with its model files to any machine and run it offline.
 """
 
 import sys
@@ -276,6 +288,38 @@ def load_from_file(path):
     return Image.open(path).convert("RGB"), path.stem
 
 
+def copy_text_to_clipboard(text):
+    """Best-effort: put `text` on the system clipboard. Returns True on
+    success, False otherwise. Never raises -- clipboard-out is a convenience,
+    not a contract, so a failure here must not fail the run.
+
+    Tries platform-native tools so it works without extra Python deps:
+      macOS   -> pbcopy
+      Windows -> clip
+      Linux   -> wl-copy (Wayland) or xclip / xsel (X11)
+    """
+    data = text.encode("utf-8")
+    if sys.platform == "darwin":
+        cmds = [["pbcopy"]]
+    elif sys.platform.startswith("win"):
+        cmds = [["clip"]]
+    else:
+        cmds = [["wl-copy"], ["xclip", "-selection", "clipboard"],
+                ["xsel", "--clipboard", "--input"]]
+    for cmd in cmds:
+        try:
+            p = subprocess.run(cmd, input=data,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+            if p.returncode == 0:
+                return True
+        except FileNotFoundError:
+            continue   # tool not installed -- try the next one
+        except Exception:
+            continue
+    return False
+
+
 def load_from_image_url(url):
     data = _download_bytes(url)
     img = Image.open(io.BytesIO(data)).convert("RGB")
@@ -363,17 +407,12 @@ def load_from_html_url(url):
 
 
 # --------------------------------------------------------------------------
-# 4. Resize: cap the largest dimension at 640, preserve aspect ratio
+# 4. (Resizing is handled entirely by smart_resize() in section 5, which
+#    bounds the image to MAX_PIXELS / MIN_PIXELS and snaps to the patch grid.
+#    There is deliberately no separate "cap the longest side" step -- pre-
+#    shrinking on top of smart_resize only destroys resolution the vision
+#    encoder could have used.)
 # --------------------------------------------------------------------------
-def cap_longest_side(img, target=640):
-    w, h = img.size
-    longest = max(w, h)
-    if longest <= target:
-        return img
-    scale = target / longest
-    new_w = max(1, round(w * scale))
-    new_h = max(1, round(h * scale))
-    return img.resize((new_w, new_h), Image.BICUBIC)
 
 
 # --------------------------------------------------------------------------
@@ -404,7 +443,7 @@ def smart_resize(height, width, factor=FACTOR,
     return h_bar, w_bar
 
 
-def preprocess_image(img):
+def preprocess_image(img, max_pixels=MAX_PIXELS):
     """Returns (pixel_values, grid_thw).
 
     pixel_values is produced in the canonical rank-5 layout
@@ -414,7 +453,7 @@ def preprocess_image(img):
     a different rank.
     """
     w, h = img.size
-    rh, rw = smart_resize(h, w)
+    rh, rw = smart_resize(h, w, max_pixels=max_pixels)
     img = img.resize((rw, rh), Image.BICUBIC)
 
     arr = np.asarray(img, dtype=np.float32) / 255.0       # rescale
@@ -549,12 +588,57 @@ def verify_files(file_map, checksums):
     return verified
 
 
+def _looks_like_model_dir(d):
+    """True if `d` contains a usable model set (the 3 ONNX graphs + tokenizer).
+
+    Used for 'portable mode': if the model files sit next to the script, we
+    use them directly -- no download, no --model-dir, no setup. This lets a
+    user copy the whole textsnap folder (script + model files) to any machine
+    and run it offline immediately.
+    """
+    d = Path(d)
+    needed = [
+        d / "onnx" / "vision_encoder_q4.onnx",
+        d / "onnx" / "decoder_q4.onnx",
+        d / "onnx" / "embedding.onnx",
+        d / "tokenizer.json",
+    ]
+    return all(p.is_file() for p in needed)
+
+
+def _portable_model_dir():
+    """Return the directory next to the textsnap script if it holds a model
+    set, else None. Tries the module dir and (for frozen/symlinked installs)
+    the resolved executable dir."""
+    candidates = []
+    try:
+        candidates.append(Path(__file__).resolve().parent)
+    except NameError:
+        pass
+    # Frozen build (PyInstaller etc.): sys.executable is the binary.
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+    for c in candidates:
+        if _looks_like_model_dir(c):
+            return c
+    return None
+
+
 def get_model_dir(override=None, verify=True):
     if override:
         d = Path(override)
         if not d.exists():
             raise SystemExit(f"[textsnap] --model-dir {d} does not exist.")
         return d
+
+    # Portable mode: model files sitting next to the script take precedence
+    # over the OS cache. No flag needed -- copy the folder, run it anywhere.
+    portable = _portable_model_dir()
+    if portable is not None:
+        log(f"[textsnap] Portable mode: using model files next to the "
+            f"script ({portable}). Integrity check skipped -- locally "
+            f"placed files are trusted, same as --model-dir.")
+        return portable
 
     from huggingface_hub import hf_hub_download
 
@@ -665,23 +749,37 @@ def make_session(path, role="generic"):
     role:
         'vision'  -> big single parallel forward pass; use all phys cores.
         'decoder' -> autoregressive, latency-bound; oversubscription hurts,
-                     so cap intra-op threads. Sequential exec mode.
+                     so cap intra-op threads (<=4, env-overridable) and
+                     disable mem_pattern (seq length grows every step).
         'embed'   -> trivial lookup; minimal threads.
     """
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     so.enable_cpu_mem_arena = True
+    # mem_pattern pre-plans buffers assuming STATIC shapes. The decoder's
+    # sequence axis grows by one every token, so the plan is invalidated each
+    # step and ORT just pays the planning overhead for nothing. Enable it only
+    # where shapes are actually static (vision encoder, embedding lookup).
     so.enable_mem_pattern = True
 
     if role == "vision":
         so.intra_op_num_threads = _PHYS_CORES
         so.inter_op_num_threads = 1
     elif role == "decoder":
-        # Per-token decode is dominated by many small GEMMs; past ~8 threads
-        # synchronization overhead outweighs the parallel gain.
-        so.intra_op_num_threads = min(_PHYS_CORES, 8)
+        # Per-token decode is dominated by many SMALL GEMMs (batch=1, one
+        # token). Beyond a handful of threads, cross-core synchronization
+        # costs more than the parallel work saved -- classic oversubscription.
+        # Default to <=4; let a deployment override via TEXTSNAP_DECODE_THREADS
+        # since the sweet spot is CPU-dependent.
+        _env = os.environ.get("TEXTSNAP_DECODE_THREADS")
+        if _env and _env.isdigit() and int(_env) > 0:
+            so.intra_op_num_threads = int(_env)
+        else:
+            so.intra_op_num_threads = max(1, min(_PHYS_CORES, 4))
         so.inter_op_num_threads = 1
+        # Dynamic (growing) seq length defeats mem_pattern -- turn it off here.
+        so.enable_mem_pattern = False
     elif role == "embed":
         so.intra_op_num_threads = min(_PHYS_CORES, 2)
         so.inter_op_num_threads = 1
@@ -712,7 +810,7 @@ def _find(names, *keywords):
 # --------------------------------------------------------------------------
 # 9. The OCR inference pipeline
 # --------------------------------------------------------------------------
-def run_ocr(img, model_dir, max_tokens=2048):
+def run_ocr(img, model_dir, max_tokens=2048, max_pixels=MAX_PIXELS):
     tok = Tokenizer.from_file(str(Path(model_dir) / "tokenizer.json"))
 
     vis_path = Path(model_dir) / "onnx" / "vision_encoder_q4.onnx"
@@ -725,7 +823,7 @@ def run_ocr(img, model_dir, max_tokens=2048):
     emb = make_session(emb_path, role="embed")
 
     # ---- preprocess image ----
-    pixel_values, grid_thw = preprocess_image(img)
+    pixel_values, grid_thw = preprocess_image(img, max_pixels=max_pixels)
     grid_t, grid_h, grid_w = grid_thw
 
     # ---- vision encoder (run FIRST, before building the prompt) ----------
@@ -840,27 +938,63 @@ def run_ocr(img, model_dir, max_tokens=2048):
             for name in past_names
         }
 
+    # --- IOBinding: bind I/O once, avoid marshaling the whole KV cache
+    #     through Python dicts on every single token. -----------------------
+    # Without binding, each dec.run() copies ~2*NUM_LAYERS cache tensors IN
+    # and the same number OUT, per token -- thousands of array copies across
+    # the C++/Python boundary over a full decode. IOBinding lets ORT keep the
+    # present.* outputs on its own allocator and we hand those OrtValues
+    # straight back as the next step's past.* inputs: zero-copy cache feedback.
     def decoder_step(embeds, attn_mask, past):
-        feed = {emb_name: embeds.astype(np.float32),
-                mask_name: attn_mask.astype(np.int64)}
-        feed.update(past)
-        out = dec.run(None, feed)
-        named = dict(zip(dec_outputs, out))
-        logits = named[logits_name]
-        # Re-key present.* outputs to past_key_values.* for the next step.
+        """past: dict name -> OrtValue (or ndarray, for the prefill seed).
+
+        Returns (logits ndarray, new_past dict name->OrtValue).
+        embeds must already be float32; attn_mask must already be int64.
+        """
+        io = dec.io_binding()
+        io.bind_cpu_input(emb_name, embeds)
+        io.bind_cpu_input(mask_name, attn_mask)
+        for name, val in past.items():
+            if isinstance(val, np.ndarray):
+                io.bind_cpu_input(name, val)
+            else:
+                # An OrtValue from the previous step -- bind it directly,
+                # no copy back into Python.
+                io.bind_ortvalue_input(name, val)
+        # Let ORT allocate every output on its own CPU allocator so the
+        # present.* tensors can be reused as next-step inputs without a copy.
+        for oname in dec_outputs:
+            io.bind_output(oname, "cpu")
+        dec.run_with_iobinding(io)
+
+        out_vals = io.get_outputs()             # list of OrtValue
+        named = dict(zip(dec_outputs, out_vals))
+        # logits is small relative to the cache and we need it on the host
+        # for argmax -- materialize just this one.
+        logits = named[logits_name].numpy()
+        # present.* stay as OrtValues; re-key them to the past.* names they
+        # feed next step. No numpy() call -> no copy.
         new_past = {present_to_past[p]: named[p] for p in present_names}
         return logits, new_past
 
     log(f"[textsnap] Decoding on {_PHYS_CORES} cores "
-          f"(KV-cache enabled, {len(past_names)//2} layers, "
+          f"(KV-cache enabled, IOBinding on, {len(past_names)//2} layers, "
           f"max {max_tokens} tokens)...")
 
     import time
     t0 = time.time()
 
+    # --- Pre-allocate the attention mask once -----------------------------
+    # The mask is all-ones and only grows; allocate it full-size up front and
+    # feed a contiguous slice each step instead of np.ones()-ing every token.
+    attn_buf = np.ones((1, seq_len + max_tokens), dtype=np.int64)
+
+    # inputs_embeds is already float32 (set in section 9 above); no per-step
+    # cast needed -- decoder_step now requires the correct dtype from us.
+
     # --- Prefill: process the full prompt once, populate the cache ---------
-    attn = np.ones((1, seq_len), dtype=np.int64)
-    logits, past = decoder_step(inputs_embeds, attn, empty_cache())
+    logits, past = decoder_step(inputs_embeds, attn_buf[:, :seq_len],
+                                empty_cache())
     next_id = int(np.argmax(logits[0, -1]))
     t_prefill = time.time() - t0
     log(f"[textsnap] Prefill done in {t_prefill:.1f}s; generating...")
@@ -871,14 +1005,17 @@ def run_ocr(img, model_dir, max_tokens=2048):
     stop_reason = "max_tokens"
     last_print = time.time()
 
-    def _looping(seq, min_run=40):
+    def _looping(seq, min_run=40, max_period=60):
         """Detect a greedy-decoding repetition loop.
 
-        Two cheap checks:
+        Three cheap checks:
           * a single token id repeated >= min_run times in a row;
-          * a short cycle (period 2..12) repeating for >= min_run tokens.
-        Greedy argmax on dense text frequently falls into these; without
-        this it would run to max_tokens every time.
+          * a short cycle (period 2..12) repeating for >= min_run tokens;
+          * a long block (period up to max_period) repeating >= 3 times --
+            this catches sentence-level loops (e.g. the same line of a page
+            emitted over and over) that the short-period scan cannot see.
+        Greedy argmax on dense or low-quality input frequently falls into
+        these; without this guard it runs to max_tokens every time.
         """
         if len(seq) < min_run:
             return False
@@ -892,7 +1029,53 @@ def run_ocr(img, model_dir, max_tokens=2048):
             if all(window[i] == window[i % period]
                    for i in range(len(window))):
                 return True
+        # Long-period: does the last `period` tokens repeat >=3x back-to-back?
+        for period in range(13, max_period + 1):
+            if len(seq) < period * 3:
+                continue
+            window = seq[-period * 3:]
+            if all(window[i] == window[i % period]
+                   for i in range(len(window))):
+                return True
         return False
+
+    # --- no-repeat-ngram banning ------------------------------------------
+    # Greedy decoding has no randomness, so once the model starts repeating
+    # an n-gram it will repeat it forever -- the run only ends at max_tokens
+    # (expensive) or when _looping() trips (after the loop already wasted
+    # many tokens). Banning is preventive: before committing a token, if it
+    # would complete an n-gram that already occurred, we forbid it and take
+    # the next-best token instead. This is the standard no_repeat_ngram_size
+    # from HF generate(). It stops a runaway at the FIRST repeat, not the
+    # 50th, which is the single biggest wall-time win on hard inputs.
+    NO_REPEAT_NGRAM = 4
+
+    def _banned_next_tokens(seq):
+        """Token ids that would complete a previously-seen NO_REPEAT_NGRAM-gram
+        if appended to `seq`. Returns a set (usually empty or tiny)."""
+        n = NO_REPEAT_NGRAM
+        if len(seq) < n - 1:
+            return ()
+        prefix = tuple(seq[-(n - 1):])
+        banned = set()
+        # Scan all prior n-grams; small n + a few thousand tokens is cheap.
+        for i in range(len(seq) - n + 1):
+            if tuple(seq[i:i + n - 1]) == prefix:
+                banned.add(seq[i + n - 1])
+        return banned
+
+    def _pick_next(logit_row, seq):
+        """argmax over the vocab, with previously-seen n-grams masked out."""
+        banned = _banned_next_tokens(seq)
+        if not banned:
+            return int(np.argmax(logit_row))
+        # Copy only when we actually need to mutate -- keeps the common
+        # (no-ban) path allocation-free.
+        row = logit_row.copy()
+        for t in banned:
+            if 0 <= t < row.shape[0]:
+                row[t] = -np.inf
+        return int(np.argmax(row))
 
     for step in range(max_tokens):
         if next_id == EOS_TOKEN_ID:
@@ -901,23 +1084,30 @@ def run_ocr(img, model_dir, max_tokens=2048):
         generated.append(next_id)
         total += 1
 
-        # Repetition guard -- stop a runaway greedy loop early.
-        if _looping(generated):
+        # Repetition guard -- backstop for any loop the n-gram ban doesn't
+        # prevent. _looping() is O(n) in the generated length; running it
+        # every token makes the whole decode O(n^2), so check every 12th.
+        if len(generated) % 12 == 0 and _looping(generated):
             stop_reason = "repetition loop"
             # Trim the looped tail so it doesn't pollute the output.
             while len(generated) > 1 and _looping(generated):
                 generated.pop()
             break
 
-        # Embed only the single new token (cheap lookup).
+        # Embed only the single new token (cheap lookup). The embedding graph
+        # already emits float32; decoder_step needs float32 -- no cast.
         tok_embed = emb.run(
             None, {emb_ids_name: np.array([[next_id]], dtype=np.int64)}
-        )[0].astype(np.float32)
+        )[0]
+        if tok_embed.dtype != np.float32:
+            tok_embed = tok_embed.astype(np.float32)
 
-        # attention_mask spans the full context so far (cached + new).
-        attn = np.ones((1, total), dtype=np.int64)
-        logits, past = decoder_step(tok_embed, attn, past)
-        next_id = int(np.argmax(logits[0, -1]))
+        # attention_mask spans the full context so far (cached + new). Reuse
+        # the pre-allocated all-ones buffer; just hand over a longer slice.
+        logits, past = decoder_step(
+            tok_embed, attn_buf[:, :total], past)
+        # n-gram-aware token selection -- prevents greedy runaway loops.
+        next_id = _pick_next(logits[0, -1], generated)
 
         # Live progress -- so a slow run is visibly alive, not hung.
         now = time.time()
@@ -1015,9 +1205,17 @@ def main():
     ap.add_argument("--plaintext", action="store_true",
                     help="output plain text instead of native markdown.")
     ap.add_argument("--model-dir", default=None,
-                    help="use ONNX/config files from this directory.")
+                    help="use ONNX/config files from this directory. "
+                         "If omitted, textsnap uses model files found next "
+                         "to the script (portable mode), else the OS cache "
+                         "(downloading on first run).")
     ap.add_argument("--max-tokens", type=int, default=2048,
                     help="max generated tokens (default 2048).")
+    ap.add_argument("--max-pixels", type=int, default=MAX_PIXELS,
+                    help=f"image pixel budget fed to the vision encoder "
+                         f"(default {MAX_PIXELS}). Lower = faster but less "
+                         f"accurate; too low makes the model hallucinate. "
+                         f"The image is only ever shrunk, never enlarged.")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip SHA-256 verification of downloaded model files "
                          "(not recommended).")
@@ -1049,11 +1247,17 @@ def main():
         raise SystemExit("[textsnap] unreachable input kind")
 
     log(f"[textsnap] Source image: {img.size[0]}x{img.size[1]}")
-    img = cap_longest_side(img, 640)
-    log(f"[textsnap] After 640 cap: {img.size[0]}x{img.size[1]}")
+    # NOTE: do NOT pre-shrink here. preprocess_image() runs smart_resize(),
+    # which bounds the image to MAX_PIXELS and snaps to the patch grid. An
+    # extra cap on top of that just discards resolution the model could have
+    # used -- and for text-dense screenshots, too-low resolution makes this
+    # VLM hallucinate confident garbage rather than degrade gracefully.
+    # The pixel budget is tunable via --max-pixels for an explicit
+    # speed/accuracy trade; it is not silently forced.
 
     model_dir = get_model_dir(args.model_dir, verify=not args.no_verify)
-    result = run_ocr(img, model_dir, max_tokens=args.max_tokens)
+    result = run_ocr(img, model_dir, max_tokens=args.max_tokens,
+                     max_pixels=args.max_pixels)
 
     if args.plaintext:
         result = to_plaintext(result)
@@ -1069,6 +1273,18 @@ def main():
 
     out_path.write_text(result, encoding="utf-8")
     log(f"[textsnap] Wrote {out_path}  ({len(result)} chars)")
+
+    # Clipboard-in -> clipboard-out: if the image came from the clipboard,
+    # put the OCR text straight back so the user can paste it immediately.
+    # The .txt file is still written (the stdout-path contract is unchanged);
+    # this is an added convenience. Best-effort -- a failure never aborts.
+    if kind == "clipboard":
+        if copy_text_to_clipboard(result):
+            log("[textsnap] OCR text copied back to the clipboard.")
+        else:
+            log("[textsnap] Could not copy to clipboard "
+                "(no pbcopy/clip/wl-copy/xclip/xsel found); "
+                "text saved to the file above.")
 
     # The one line stdout is for: the path, bare, so `OUT=$(textsnap x.png)`
     # and `textsnap x.png | xargs cat` just work.
